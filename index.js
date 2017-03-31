@@ -3,6 +3,7 @@ var child_process = require("child_process");
 var fs = require("fs");
 var os = require("os");
 var util = require ("util");
+var events = require("events");
 
 var serviceWrap;
 var runInitialised = false;
@@ -425,13 +426,7 @@ function run (stdoutLogStream, stderrLogStream, stopCallback) {
 			return stderrLogStream;
 		});
 		
-		if (os.platform() == "win32") {
-			setInterval (function () {
-				if (isStopRequested ()) {
-					stopCallback ();
-				}
-			}, 2000);
-		} else {
+		if (os.platform() != "win32") {
 			process.on("SIGINT", function() {
 				stopCallback ();
 			});
@@ -445,7 +440,7 @@ function run (stdoutLogStream, stderrLogStream, stopCallback) {
 	}
 	
 	if (os.platform() == "win32") {
-		getServiceWrap ().run ();
+	    startWindowsService(stopCallback);
 	}
 }
 
@@ -456,7 +451,61 @@ function stop (rcode) {
 	process.exit (rcode || 0);
 }
 
+function startWindowsService(stopCallback) {
+
+    getServiceWrap ().run (serviceCallback);
+
+    // Called in response to the HandlerEx callback in the service.
+    // https://msdn.microsoft.com/library/ms683241
+    function serviceCallback (control) {
+        var name = controlNames[control];
+
+        eventEmitter.emit (name, name);
+        eventEmitter.emit ("*", name);
+
+        if (stopCallback && name === "stop") {
+            setTimeout(stopCallback, 1000);
+        }
+    }
+}
+
+
+var controlCodes = {
+    "stop":                  0x00000001,
+    "pause":                 0x00000002,
+    "continue":              0x00000003,
+    "interrogate":           0x00000004,
+    "shutdown":              0x00000005,
+    "paramchange":           0x00000006,
+    "netbindadd":            0x00000007,
+    "netbindremove":         0x00000008,
+    "netbindenable":         0x00000009,
+    "netbinddisable":        0x0000000A,
+    "deviceevent":           0x0000000B,
+    "hardwareprofilechange": 0x0000000C,
+    "powerevent":            0x0000000D,
+    "sessionchange":         0x0000000E,
+    "preshutdown":           0x0000000F,
+    "timechange":            0x00000010,
+    "triggerevent":          0x00000020
+};
+var controlNames = {};
+for (var prop in controlCodes) {
+    if (controlCodes.hasOwnProperty(prop)) {
+        controlNames[controlCodes[prop]] = prop;
+    }
+}
+
+
+var eventEmitter = new events.EventEmitter();
+function on(eventName, fn) {
+    if (os.platform() == "win32") {
+        eventEmitter.on (eventName, fn);
+    }
+}
+
 exports.add = add;
 exports.remove = remove;
 exports.run = run;
 exports.stop = stop;
+exports.on = on;

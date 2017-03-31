@@ -3,11 +3,13 @@
 
 #include <node.h>
 #include <nan.h>
+#include <uv.h>
 
 #include <io.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string>
+#include <queue>
 #include <windows.h>
 
 #include "pthread.h"
@@ -24,7 +26,13 @@ static pthread_mutex_t stop_requested_mtx;
 static pthread_cond_t stop_service;
 static pthread_mutex_t stop_service_mtx;
 
+static std::queue<DWORD> signals;
+static pthread_mutex_t signals_mtx;
+
 HANDLE node_thread_handle;
+
+Nan::Callback* callback;
+uv_async_t async;
 
 static char errbuf[1024];
 const char* raw_strerror (int code) {
@@ -59,22 +67,53 @@ DWORD set_status (DWORD status_code, DWORD win32_rcode, DWORD service_rcode) {
 	return 0;
 }
 
-VOID WINAPI handler (DWORD signal) {
+void invoke_callback(uv_async_t* handle) {
+	Nan::HandleScope scope;
+	v8::Isolate* isolate = v8::Isolate::GetCurrent();
+	
+	pthread_mutex_lock(&signals_mtx);
+
+	while (!signals.empty()) {
+		Local<Value> argv[] = { v8::Number::New(isolate, signals.front()) };
+		callback->Call(1, argv);
+		signals.pop();
+	}
+
+	pthread_mutex_unlock(&signals_mtx);
+}
+
+DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID context) {
+
+	if (callback) {
+		// The signals are put in a queue because uv_async_send doesn't guarantee to invoke
+		// this function every time.
+		pthread_mutex_lock(&signals_mtx);
+		signals.push(signal);
+		pthread_mutex_unlock(&signals_mtx);
+		// Invoke the call back on the main thread
+		uv_async_send(&async);
+	}
+	
 	switch (signal) {
 		case (SERVICE_CONTROL_STOP):
 		case (SERVICE_CONTROL_SHUTDOWN):
 			set_status(SERVICE_STOP_PENDING, NO_ERROR, 0);
-			pthread_mutex_lock (&stop_requested_mtx);
+			pthread_mutex_lock(&stop_requested_mtx);
 			stop_requested = true;
-			pthread_mutex_unlock (&stop_requested_mtx);
+			pthread_mutex_unlock(&stop_requested_mtx);
+			break;
+		case (SERVICE_CONTROL_INTERROGATE):
 			break;
 		default:
 			break;
+			//return ERROR_CALL_NOT_IMPLEMENTED;
 	}
+
+	return NO_ERROR;
 }
 
 VOID WINAPI run (DWORD argc, LPTSTR *argv) {
-	if (! (status_handle = RegisterServiceCtrlHandler ("", handler))) {
+	if (! (status_handle = RegisterServiceCtrlHandlerEx ("", handler, NULL))) {
 		set_status (SERVICE_STOPPED, GetLastError (), 0);
 		return;
 	}
@@ -279,6 +318,16 @@ NAN_METHOD(Run) {
 		return;
 	}
 
+	if (info.Length() > 0) {
+		if (! info[0]->IsFunction()) {
+			Nan::ThrowTypeError("Callback argument must be a function");
+			return;
+		}
+		callback = new Nan::Callback(info[0].As<Function>());
+		uv_loop_t *loop = uv_default_loop();
+		uv_async_init(loop, &async, invoke_callback);
+	}
+
 	node_thread_handle = GetCurrentThread ();
 
 	HANDLE handle = CreateThread (NULL, 0, run_thread, NULL, 0, NULL);
@@ -320,6 +369,8 @@ NAN_METHOD(Stop) {
 	pthread_cond_signal (&stop_service);
 	
 	set_status (SERVICE_STOPPED, NO_ERROR, rcode);
+
+	uv_close((uv_handle_t*)&async, NULL);
 
 	info.GetReturnValue().Set(info.This());
 }
