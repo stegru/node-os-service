@@ -16,6 +16,8 @@
 #include "service.h"
 
 static bool run_initialised = false;
+static DWORD controls_accepted = 0;
+static DWORD service_state = SERVICE_STOPPED;
 
 static SERVICE_STATUS_HANDLE status_handle;
 static pthread_mutex_t status_handle_mtx;
@@ -26,7 +28,7 @@ static pthread_mutex_t stop_requested_mtx;
 static pthread_cond_t stop_service;
 static pthread_mutex_t stop_service_mtx;
 
-static std::queue<DWORD> signals;
+static std::queue<std::pair<DWORD, DWORD>> signals;
 static pthread_mutex_t signals_mtx;
 
 HANDLE node_thread_handle;
@@ -52,7 +54,7 @@ DWORD set_status (DWORD status_code, DWORD win32_rcode, DWORD service_rcode) {
 
 	status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 	status.dwCurrentState = status_code;
-	status.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_STOP;
+	status.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_STOP | controls_accepted;
 	status.dwWin32ExitCode = (service_rcode
 			? ERROR_SERVICE_SPECIFIC_ERROR
 			: win32_rcode);
@@ -61,6 +63,7 @@ DWORD set_status (DWORD status_code, DWORD win32_rcode, DWORD service_rcode) {
 	status.dwWaitHint = 10000;
 
 	pthread_mutex_lock (&status_handle_mtx);
+	service_state = status_code;
 	SetServiceStatus (status_handle, &status);
 	pthread_mutex_unlock (&status_handle_mtx);
 
@@ -69,31 +72,36 @@ DWORD set_status (DWORD status_code, DWORD win32_rcode, DWORD service_rcode) {
 
 void invoke_callback(uv_async_t* handle) {
 	Nan::HandleScope scope;
-	v8::Isolate* isolate = v8::Isolate::GetCurrent();
+	Isolate* isolate = Isolate::GetCurrent();
 	
 	pthread_mutex_lock(&signals_mtx);
 
 	while (!signals.empty()) {
-		Local<Value> argv[] = { v8::Number::New(isolate, signals.front()) };
-		callback->Call(1, argv);
+		std::pair<DWORD, DWORD> pair = signals.front();
+		
+		Local<Value> argv[] = {
+			Number::New(isolate, pair.first),
+			Number::New(isolate, pair.second)
+		};
+		callback->Call(2, argv);
 		signals.pop();
 	}
 
 	pthread_mutex_unlock(&signals_mtx);
 }
 
+void send_control(DWORD control, DWORD event_type) {
+	// The signals are put in a queue because uv_async_send doesn't guarantee to invoke
+	// this function every time.
+	pthread_mutex_lock(&signals_mtx);
+	signals.push(std::make_pair(control, event_type));
+	pthread_mutex_unlock(&signals_mtx);
+	// Invoke the call back on the main thread
+	uv_async_send(&async);
+}
+
 DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID context) {
 
-	if (callback) {
-		// The signals are put in a queue because uv_async_send doesn't guarantee to invoke
-		// this function every time.
-		pthread_mutex_lock(&signals_mtx);
-		signals.push(signal);
-		pthread_mutex_unlock(&signals_mtx);
-		// Invoke the call back on the main thread
-		uv_async_send(&async);
-	}
-	
 	switch (signal) {
 		case (SERVICE_CONTROL_STOP):
 		case (SERVICE_CONTROL_SHUTDOWN):
@@ -102,12 +110,17 @@ DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID 
 			stop_requested = true;
 			pthread_mutex_unlock(&stop_requested_mtx);
 			break;
-		case (SERVICE_CONTROL_INTERROGATE):
+		case (SERVICE_CONTROL_PAUSE):
+			set_status(SERVICE_PAUSE_PENDING, NO_ERROR, 0);
+			break;
+		case (SERVICE_CONTROL_CONTINUE):
+			set_status(SERVICE_CONTINUE_PENDING, NO_ERROR, 0);
 			break;
 		default:
 			break;
-			//return ERROR_CALL_NOT_IMPLEMENTED;
 	}
+
+	send_control(signal, event_type);
 
 	return NO_ERROR;
 }
@@ -119,6 +132,8 @@ VOID WINAPI run (DWORD argc, LPTSTR *argv) {
 	}
 
 	set_status (SERVICE_RUNNING, NO_ERROR, 0);
+
+	send_control(0, 0);
 
 	pthread_mutex_lock (&stop_service_mtx);
 	pthread_cond_wait (&stop_service, &stop_service_mtx);
@@ -154,7 +169,8 @@ void InitAll (Handle<Object> exports) {
 	pthread_mutex_init(&status_handle_mtx, NULL);
 	pthread_mutex_init(&stop_requested_mtx, NULL);
 	pthread_mutex_init(&stop_service_mtx, NULL);
-	
+	pthread_mutex_init(&signals_mtx, NULL);
+
 	pthread_cond_init(&stop_service, NULL);
 
 	exports->Set(Nan::New("add").ToLocalChecked(),
@@ -170,7 +186,16 @@ void InitAll (Handle<Object> exports) {
 			Nan::GetFunction(Nan::New<FunctionTemplate>(Run)).ToLocalChecked());
 	
 	exports->Set(Nan::New("stop").ToLocalChecked(),
-			Nan::GetFunction(Nan::New<FunctionTemplate>(Stop)).ToLocalChecked());
+		Nan::GetFunction(Nan::New<FunctionTemplate>(Stop)).ToLocalChecked());
+
+	exports->Set(Nan::New("setState").ToLocalChecked(),
+		Nan::GetFunction(Nan::New<FunctionTemplate>(SetState)).ToLocalChecked());
+
+	exports->Set(Nan::New("getState").ToLocalChecked(),
+		Nan::GetFunction(Nan::New<FunctionTemplate>(GetState)).ToLocalChecked());
+
+	exports->Set(Nan::New("setControlsAccepted").ToLocalChecked(),
+		Nan::GetFunction(Nan::New<FunctionTemplate>(SetControlsAccepted)).ToLocalChecked());
 }
 
 NODE_MODULE(service, InitAll)
@@ -312,7 +337,7 @@ NAN_METHOD(Remove) {
 
 NAN_METHOD(Run) {
 	Nan::HandleScope scope;
-	
+
 	if (run_initialised) {
 		info.GetReturnValue().Set(info.This());
 		return;
@@ -371,6 +396,49 @@ NAN_METHOD(Stop) {
 	set_status (SERVICE_STOPPED, NO_ERROR, rcode);
 
 	uv_close((uv_handle_t*)&async, NULL);
+
+	info.GetReturnValue().Set(info.This());
+}
+
+NAN_METHOD(SetState) {
+	Nan::HandleScope scope;
+
+	if (info.Length() > 0) {
+		if (!info[0]->IsNumber()) {
+			Nan::ThrowTypeError("First argument must be a number");
+			return;
+		}
+
+		DWORD new_state = info[0]->Uint32Value();
+		set_status(new_state, NO_ERROR, 0);
+	}
+
+	info.GetReturnValue().Set(info.This());
+}
+
+NAN_METHOD(GetState) {
+	Nan::HandleScope scope;
+	Isolate* isolate = Isolate::GetCurrent();
+
+	pthread_mutex_lock(&status_handle_mtx);
+	Local<Number> stateNumber = Number::New(isolate, service_state);
+	pthread_mutex_unlock(&status_handle_mtx);
+
+	info.GetReturnValue().Set(stateNumber);
+}
+
+NAN_METHOD(SetControlsAccepted) {
+	Nan::HandleScope scope;
+
+	if (info.Length() > 0) {
+		if (!info[0]->IsNumber()) {
+			Nan::ThrowTypeError("First argument must be a number");
+			return;
+		}
+
+		controls_accepted = info[0]->Uint32Value();
+		set_status(SERVICE_RUNNING, NO_ERROR, 0);
+	}
 
 	info.GetReturnValue().Set(info.This());
 }

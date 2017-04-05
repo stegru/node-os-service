@@ -455,57 +455,186 @@ function startWindowsService(stopCallback) {
 
     getServiceWrap ().run (serviceCallback);
 
+    acceptControl ("stop");
+
     // Called in response to the HandlerEx callback in the service.
     // https://msdn.microsoft.com/library/ms683241
-    function serviceCallback (control) {
+    function serviceCallback (control, eventType) {
         var name = controlNames[control];
 
-        eventEmitter.emit (name, name);
-        eventEmitter.emit ("*", name);
+        var eventTypeName = eventTypes[name] && eventTypes[name][eventType];
 
-        if (stopCallback && name === "stop") {
-            setTimeout(stopCallback, 1000);
+        eventEmitter.emit (name, name, eventTypeName);
+        eventEmitter.emit ("*", name, eventTypeName);
+
+        switch (name) {
+        case "stop":
+            if (stopCallback) {
+                setTimeout(stopCallback, 1000);
+            }
+            break;
+        case "pause":
+            setState("paused");
+            break;
+        case "continue":
+            setState("running");
+            break;
         }
     }
 }
 
+function setState(stateName) {
+    if (os.platform() !== "win32") {
+        return;
+    }
 
-var controlCodes = {
-    "stop":                  0x00000001,
-    "pause":                 0x00000002,
-    "continue":              0x00000003,
-    "interrogate":           0x00000004,
-    "shutdown":              0x00000005,
-    "paramchange":           0x00000006,
-    "netbindadd":            0x00000007,
-    "netbindremove":         0x00000008,
-    "netbindenable":         0x00000009,
-    "netbinddisable":        0x0000000A,
-    "deviceevent":           0x0000000B,
-    "hardwareprofilechange": 0x0000000C,
-    "powerevent":            0x0000000D,
-    "sessionchange":         0x0000000E,
-    "preshutdown":           0x0000000F,
-    "timechange":            0x00000010,
-    "triggerevent":          0x00000020
-};
-var controlNames = {};
-for (var prop in controlCodes) {
-    if (controlCodes.hasOwnProperty(prop)) {
-        controlNames[controlCodes[prop]] = prop;
+    if (stateName === "stopped") {
+        stop(0);
+    } else {
+        var state = states[stateName];
+        getServiceWrap().setState(state);
     }
 }
 
+function getState() {
+    if (os.platform() !== "win32") {
+        return;
+    }
+
+    var state = getServiceWrap().getState();
+    return stateNames[state] || "stopped";
+}
+
+function acceptControl(controlName, add) {
+    add = add !== false;
+
+    var serviceAcceptFlags = {
+        // SERVICE_ACCEPT_STOP
+        "stop": 0x00000001,
+        // SERVICE_ACCEPT_PAUSE_CONTINUE
+        "pause": 0x00000002,
+        "continue": 0x00000002,
+        // SERVICE_ACCEPT_SHUTDOWN
+        "shutdown": 0x00000004,
+        // SERVICE_ACCEPT_PARAMCHANGE
+        "paramchange": 0x00000008,
+        // SERVICE_ACCEPT_NETBINDCHANGE
+        "netbindadd": 0x00000010,
+        "netbindremove": 0x00000010,
+        "netbindenable": 0x00000010,
+        "netbinddisable": 0x00000010,
+        // SERVICE_ACCEPT_HARDWAREPROFILECHANGE
+        "hardwareprofilechange": 0x00000020,
+        // SERVICE_ACCEPT_POWEREVENT
+        "powerevent": 0x00000040,
+        // SERVICE_ACCEPT_SESSIONCHANGE
+        "sessionchange": 0x00000080,
+        // SERVICE_ACCEPT_PRESHUTDOWN
+        "preshutdown": 0x00000100,
+        // SERVICE_ACCEPT_TIMECHANGE
+        "timechange": 0x00000200,
+        // SERVICE_ACCEPT_TRIGGEREVENT
+        "triggerevent": 0x00000400
+    };
+
+    var all = Array.isArray(controlName) ? controlName : [ controlName ];
+
+    for (var n = 0; n < all.length; n++) {
+        var control = all[n];
+        var flag = serviceAcceptFlags.hasOwnProperty(control) && serviceAcceptFlags[control];
+
+        if (add) {
+            controlsAccepted |= flag;
+        } else {
+            controlsAccepted &= ~flag;
+        }
+    }
+
+    if (runInitialised) {
+        getServiceWrap().setControlsAccepted(controlsAccepted);
+    }
+}
+
+var controlsAccepted = 0;
+var controlCodes = {
+    "start":                 0,      // not a real control code
+    "stop":                  0x0001, // SERVICE_CONTROL_STOP
+    "pause":                 0x0002, // SERVICE_CONTROL_PAUSE
+    "continue":              0x0003, // SERVICE_CONTROL_CONTINUE
+    "interrogate":           0x0004, // SERVICE_CONTROL_INTERROGATE
+    "shutdown":              0x0005, // SERVICE_CONTROL_SHUTDOWN
+    "paramchange":           0x0006, // SERVICE_CONTROL_PARAMCHANGE
+    "netbindadd":            0x0007, // SERVICE_CONTROL_NETBINDADD
+    "netbindremove":         0x0008, // SERVICE_CONTROL_NETBINDREMOVE
+    "netbindenable":         0x0009, // SERVICE_CONTROL_NETBINDENABLE
+    "netbinddisable":        0x000A, // SERVICE_CONTROL_NETBINDDISABLE
+    "deviceevent":           0x000B, // SERVICE_CONTROL_DEVICEEVENT
+    "hardwareprofilechange": 0x000C, // SERVICE_CONTROL_HARDWAREPROFILECHANGE
+    "powerevent":            0x000D, // SERVICE_CONTROL_POWEREVENT
+    "sessionchange":         0x000E, // SERVICE_CONTROL_SESSIONCHANGE
+    "preshutdown":           0x000F, // SERVICE_CONTROL_PRESHUTDOWN
+    "timechange":            0x0010, // SERVICE_CONTROL_TIMECHANGE
+    "triggerevent":          0x0020  // SERVICE_CONTROL_TRIGGEREVENT
+};
+var controlNames = flip(controlCodes);
+
+var states = {
+    "stopped":          0x01, // SERVICE_STOPPED
+    "start-pending":    0x02, // SERVICE_START_PENDING
+    "stop-pending":     0x03, // SERVICE_STOP_PENDING
+    "running":          0x04, // SERVICE_RUNNING
+    "continue-pending": 0x05, // SERVICE_CONTINUE_PENDING
+    "pause-pending":    0x06, // SERVICE_PAUSE_PENDING
+    "paused":           0x07  // SERVICE_PAUSED
+};
+var stateNames = flip(states);
+
+var eventTypes = {
+    "sessionchange": {
+        0x01: "console-connect",         // WTS_CONSOLE_CONNECT
+        0x02: "console-disconnect",      // WTS_CONSOLE_DISCONNECT
+        0x03: "remote-connect",          // WTS_REMOTE_CONNECT
+        0x04: "remote-disconnect",       // WTS_REMOTE_DISCONNECT
+        0x05: "session-logon",           // WTS_SESSION_LOGON
+        0x06: "session-logoff",          // WTS_SESSION_LOGOFF
+        0x07: "session-lock",            // WTS_SESSION_LOCK
+        0x08: "session-unlock",          // WTS_SESSION_UNLOCK
+        0x09: "session-remote-control",  // WTS_SESSION_REMOTE_CONTROL
+        0x0A: "session-create",          // WTS_SESSION_CREATE
+        0x0B: "session-terminate"        // WTS_SESSION_TERMINATE
+    }
+};
+
+function flip(obj) {
+    var togo = {};
+    for (var prop in obj) {
+        if (obj.hasOwnProperty(prop)) {
+            togo[obj[prop]] = prop;
+        }
+    }
+    return togo;
+}
 
 var eventEmitter = new events.EventEmitter();
+
+/**
+ * Adds an event listener for a service code.
+ *
+ * @param eventName start|stop|pause|continue|interrogate|shutdown|paramchange|netbindadd|netbindremove|netbindenable|
+ * netbinddisable|deviceevent|hardwareprofilechange|powerevent|sessionchange|preshutdown|timechange|triggerevent
+ * @param fn
+ */
 function on(eventName, fn) {
     if (os.platform() == "win32") {
+        acceptControl (eventName);
         eventEmitter.on (eventName, fn);
     }
 }
-
 exports.add = add;
 exports.remove = remove;
 exports.run = run;
 exports.stop = stop;
 exports.on = on;
+exports.setState = setState;
+exports.getState = getState;
+exports.acceptControl = acceptControl;
