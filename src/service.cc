@@ -28,7 +28,13 @@ static pthread_mutex_t stop_requested_mtx;
 static pthread_cond_t stop_service;
 static pthread_mutex_t stop_service_mtx;
 
-static std::queue<std::pair<DWORD, DWORD>> signals;
+typedef struct {
+	DWORD signal;
+	DWORD event_type;
+	LPVOID event_data;
+} SignalData;
+
+static std::queue<SignalData*> signals;
 static pthread_mutex_t signals_mtx;
 
 HANDLE node_thread_handle;
@@ -77,24 +83,37 @@ void invoke_callback(uv_async_t* handle) {
 	pthread_mutex_lock(&signals_mtx);
 
 	while (!signals.empty()) {
-		std::pair<DWORD, DWORD> pair = signals.front();
+		SignalData* data = signals.front();
 		
 		Local<Value> argv[] = {
-			Number::New(isolate, pair.first),
-			Number::New(isolate, pair.second)
+			Number::New(isolate, data->signal),
+			Number::New(isolate, data->event_type),
+			Number::New(isolate, (UINT)data->event_data)
 		};
-		callback->Call(2, argv);
+		callback->Call(3, argv);
+
+		if (data->event_data) {
+			free(data->event_data);
+		}
+		free(data);
 		signals.pop();
+
 	}
 
 	pthread_mutex_unlock(&signals_mtx);
 }
 
-void send_control(DWORD control, DWORD event_type) {
+void send_control(DWORD control, DWORD event_type, LPVOID event_data) {
 	// The signals are put in a queue because uv_async_send doesn't guarantee to invoke
 	// this function every time.
 	pthread_mutex_lock(&signals_mtx);
-	signals.push(std::make_pair(control, event_type));
+
+	SignalData *data = (SignalData*)malloc(sizeof(SignalData));
+	data->signal = control;
+	data->event_type = event_type;
+	data->event_data = NULL;
+	
+	signals.push(data);
 	pthread_mutex_unlock(&signals_mtx);
 	// Invoke the call back on the main thread
 	uv_async_send(&async);
@@ -120,7 +139,7 @@ DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID 
 			break;
 	}
 
-	send_control(signal, event_type);
+	send_control(signal, event_type, event_data);
 
 	return NO_ERROR;
 }
@@ -133,7 +152,7 @@ VOID WINAPI run (DWORD argc, LPTSTR *argv) {
 
 	set_status (SERVICE_RUNNING, NO_ERROR, 0);
 
-	send_control(0, 0);
+	send_control(0, 0, 0);
 
 	pthread_mutex_lock (&stop_service_mtx);
 	pthread_cond_wait (&stop_service, &stop_service_mtx);
