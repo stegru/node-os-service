@@ -13,7 +13,7 @@ var linuxStartStopScript = [
 	'',
 	'### BEGIN INIT INFO',
 	'# Provides:          ##NAME##',
-	'# Required-Start:    ',
+	'# Required-Start:    ##DEPENDENCIES##',
 	'# Required-Stop:     ',
 	'# Default-Start:     ##RUN_LEVELS_ARR##',
 	'# Default-Stop:      0 1 6',
@@ -23,6 +23,8 @@ var linuxStartStopScript = [
 	'',
 	'# chkconfig:   ##RUN_LEVELS_STR## 99 1',
 	'# description: ##NAME##',
+	'',
+	'umask 0007',
 	'',
 	'set_pid () {',
 	'	unset PID',
@@ -144,6 +146,7 @@ var linuxSystemUnit = [
 	'[Unit]',
 	'Description=##NAME##',
 	'After=network.target',
+	'Requires=##DEPENDENCIES##',
 	'',
 	'[Service]',
 	'Type=simple',
@@ -152,7 +155,8 @@ var linuxSystemUnit = [
 	'UMask=0007',
 	'ExecStart=##NODE_PATH## ##NODE_ARGS## ##PROGRAM_PATH## ##PROGRAM_ARGS##',
 	'',
-	'[Install]'
+	'[Install]',
+	'WantedBy=##SYSTEMD_WANTED_BY##'
 ];
 
 function getServiceWrap () {
@@ -204,7 +208,7 @@ function add (name, options, cb) {
 		var displayName = (options && options.displayName)
 				? options.displayName
 				: name;
-		
+
 		var serviceArgs = [];
 
 		serviceArgs.push (nodePath);
@@ -214,19 +218,23 @@ function add (name, options, cb) {
 				serviceArgs.push (options.nodeArgs[i]);
 
 		serviceArgs.push (programPath);
-	
+
 		if (options && options.programArgs)
 			for (var i = 0; i < options.programArgs.length; i++)
 				serviceArgs.push (options.programArgs[i]);
-	
+
 		for (var i = 0; i < serviceArgs.length; i++)
 			serviceArgs[i] = "\"" + serviceArgs[i] + "\"";
-	
+
 		var servicePath = serviceArgs.join (" ");
+
+		deps = options.dependencies
+				? options.dependencies.join("\0") + "\0\0"
+				: ""
 
 		try {
 			getServiceWrap ().add (name, displayName, servicePath, username,
-					password);
+					password, deps);
 			cb();
 		} catch (error) {
 			cb(error);
@@ -241,13 +249,17 @@ function add (name, options, cb) {
 		if (options && options.programArgs)
 			for (var i = 0; i < options.programArgs.length; i++)
 				programArgs.push ("\"" + options.programArgs[i] + "\"");
-		
+
 		var runLevels = [2, 3, 4, 5];
 		if (options && options.runLevels)
 			runLevels = options.runLevels;
 
 		var nodeArgsStr = nodeArgs.join(" ");
 		var programArgsStr = programArgs.join(" ");
+
+		var deps = (options && options.dependencies)
+				? options.dependencies.join(" ")
+				: ""
 
 		var initPath = "/etc/init.d/" + name;
 		var systemPath = "/usr/lib/systemd/system/" + name + ".service";
@@ -262,7 +274,7 @@ function add (name, options, cb) {
 
 					for (var i = 0; i < linuxStartStopScript.length; i++) {
 						var line = linuxStartStopScript[i];
-						
+
 						line = line.replace("##NAME##", name);
 						line = line.replace("##NODE_PATH##", nodePath);
 						line = line.replace("##NODE_ARGS##", nodeArgsStr);
@@ -270,10 +282,11 @@ function add (name, options, cb) {
 						line = line.replace("##PROGRAM_ARGS##", programArgsStr);
 						line = line.replace("##RUN_LEVELS_ARR##", runLevels.join(" "));
 						line = line.replace("##RUN_LEVELS_STR##", runLevels.join(""));
-						
+						line = line.replace("##DEPENDENCIES##", deps);
+
 						startStopScript.push(line);
 					}
-					
+
 					var startStopScriptStr = startStopScript.join("\n");
 
 					fs.writeFile(initPath, startStopScriptStr, ctlOptions, function(error) {
@@ -305,18 +318,24 @@ function add (name, options, cb) {
 			} else {
 				var systemUnit = [];
 
+				var systemdWantedBy = "multi-user.target"
+				if (options && options.systemdWantedBy)
+					systemdWantedBy = options.systemdWantedBy
+
 				for (var i = 0; i < linuxSystemUnit.length; i++) {
 					var line = linuxSystemUnit[i];
-					
+
 					line = line.replace("##NAME##", name);
 					line = line.replace("##NODE_PATH##", nodePath);
 					line = line.replace("##NODE_ARGS##", nodeArgsStr);
 					line = line.replace("##PROGRAM_PATH##", programPath);
 					line = line.replace("##PROGRAM_ARGS##", programArgsStr);
-					
+					line = line.replace("##SYSTEMD_WANTED_BY##", systemdWantedBy);
+					line = line.replace("##DEPENDENCIES##", deps);
+
 					systemUnit.push(line);
 				}
-				
+
 				var systemUnitStr = systemUnit.join("\n");
 
 				fs.writeFile(systemPath, systemUnitStr, ctlOptions, function(error) {
@@ -335,7 +354,7 @@ function add (name, options, cb) {
 			}
 		})
 	}
-	
+
 	return this;
 }
 
@@ -353,7 +372,8 @@ function remove (name, cb) {
 		}
 	} else {
 		var initPath = "/etc/init.d/" + name;
-		var systemPath = "/usr/lib/systemd/system/" + name + ".service";
+		var systemDir = "/usr/lib/systemd/system"
+		var systemPath = systemDir + "/" + name + ".service";
 
 		function removeCtlPaths() {
 			fs.unlink(initPath, function(error) {
@@ -375,7 +395,7 @@ function remove (name, cb) {
 			});
 		};
 
-		fs.stat("/usr/lib/systemd/system", function(error, stats) {
+		fs.stat(systemDir, function(error, stats) {
 			if (error) {
 				if (error.code == "ENOENT") {
 					runProcess("chkconfig", ["--del", name], function(error) {
@@ -396,7 +416,7 @@ function remove (name, cb) {
 						}
 					})
 				} else {
-					cb(new Error("stat(/usr/lib/systemd/system) failed: " + error.message));
+					cb(new Error("stat(" + systemDir + ") failed: " + error.message));
 				}
 			} else {
 				runProcess("systemctl", ["disable", name], function(error) {
@@ -411,22 +431,15 @@ function remove (name, cb) {
 	}
 }
 
-function run (stdoutLogStream, stderrLogStream, stopCallback) {
-	if (! stopCallback) {
-		stopCallback = stderrLogStream;
-		stderrLogStream = stdoutLogStream;
-	}
-
+function run (stopCallback) {
 	if (! runInitialised) {
-		process.__defineGetter__('stdout', function() {
-			return stdoutLogStream;
-		});
-		
-		process.__defineGetter__('stderr', function() {
-			return stderrLogStream;
-		});
-		
-		if (os.platform() != "win32") {
+		if (os.platform() == "win32") {
+			setInterval (function () {
+				if (isStopRequested ()) {
+					stopCallback ();
+				}
+			}, 2000);
+		} else {
 			process.on("SIGINT", function() {
 				stopCallback ();
 			});
@@ -435,10 +448,10 @@ function run (stdoutLogStream, stderrLogStream, stopCallback) {
 				stopCallback ();
 			});
 		}
-		
+
 		runInitialised = true;
 	}
-	
+
 	if (os.platform() == "win32") {
 	    startWindowsService(stopCallback);
 	}

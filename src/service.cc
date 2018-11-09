@@ -204,7 +204,7 @@ NAN_METHOD(Add) {
 	Nan::HandleScope scope;
 	
 	if (info.Length() < 3) {
-		Nan::ThrowError("Two arguments are required");
+		Nan::ThrowError("At lease 3 arguments are required");
 		return;
 	}
 	
@@ -223,7 +223,7 @@ NAN_METHOD(Add) {
 	Nan::Utf8String display_name(info[1]);
 
 	if (! info[2]->IsString ()) {
-		Nan::ThrowTypeError("Name argument must be a string");
+		Nan::ThrowTypeError("Path argument must be a string");
 		return;
 	}
 	
@@ -246,6 +246,14 @@ NAN_METHOD(Add) {
 		}
 	}
 
+	const char* deps = NULL;
+	if (info.Length() > 5) {
+		if (info[5]->IsString ()) {
+			Nan::Utf8String tmp_deps(info[5]);
+			deps = *tmp_deps;
+		}
+	}
+
 	SC_HANDLE scm_handle = OpenSCManager (0, SERVICES_ACTIVE_DATABASE,
 			SC_MANAGER_ALL_ACCESS);
 	if (! scm_handle) {
@@ -260,7 +268,8 @@ NAN_METHOD(Add) {
 
 	SC_HANDLE svc_handle = CreateService (scm_handle, *name, *display_name,
 			SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
-			SERVICE_ERROR_NORMAL, *path, 0, 0, 0, pusername, ppassword);
+			SERVICE_ERROR_NORMAL, *path, 0, 0, deps, pusername,
+			ppassword);
 
 	if (! svc_handle) {
 		std::string message ("CreateService() failed: ");
@@ -386,14 +395,14 @@ NAN_METHOD(Stop) {
 			return;
 		}
 		
-		rcode = info[0]->ToUint32()->Value();
+		rcode = Nan::To<Uint32>(info[0]).ToLocalChecked()->Value();
 	}
-	
+
 	set_status (SERVICE_STOP_PENDING, NO_ERROR, 0);
 	
 	pthread_cond_signal (&stop_service);
 	
-	set_status (SERVICE_STOPPED, NO_ERROR, rcode);
+	set_status (SERVICE_STOPPED, NO_ERROR, rcode);			
 
 	uv_close((uv_handle_t*)&async, NULL);
 
