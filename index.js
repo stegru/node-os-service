@@ -434,11 +434,7 @@ function remove (name, cb) {
 function run (stopCallback) {
 	if (! runInitialised) {
 		if (os.platform() == "win32") {
-			setInterval (function () {
-				if (isStopRequested ()) {
-					stopCallback ();
-				}
-			}, 2000);
+			startWindowsService (stopCallback);
 		} else {
 			process.on("SIGINT", function() {
 				stopCallback ();
@@ -450,10 +446,6 @@ function run (stopCallback) {
 		}
 		
 		runInitialised = true;
-	}
-	
-	if (os.platform() == "win32") {
-	    startWindowsService (stopCallback);
 	}
 }
 
