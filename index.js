@@ -208,7 +208,7 @@ function add (name, options, cb) {
 		var displayName = (options && options.displayName)
 				? options.displayName
 				: name;
-		
+
 		var serviceArgs = [];
 
 		serviceArgs.push (nodePath);
@@ -218,14 +218,14 @@ function add (name, options, cb) {
 				serviceArgs.push (options.nodeArgs[i]);
 
 		serviceArgs.push (programPath);
-	
+
 		if (options && options.programArgs)
 			for (var i = 0; i < options.programArgs.length; i++)
 				serviceArgs.push (options.programArgs[i]);
-	
+
 		for (var i = 0; i < serviceArgs.length; i++)
 			serviceArgs[i] = "\"" + serviceArgs[i] + "\"";
-	
+
 		var servicePath = serviceArgs.join (" ");
 
 		deps = options.dependencies
@@ -249,7 +249,7 @@ function add (name, options, cb) {
 		if (options && options.programArgs)
 			for (var i = 0; i < options.programArgs.length; i++)
 				programArgs.push ("\"" + options.programArgs[i] + "\"");
-		
+
 		var runLevels = [2, 3, 4, 5];
 		if (options && options.runLevels)
 			runLevels = options.runLevels;
@@ -266,7 +266,7 @@ function add (name, options, cb) {
 		var ctlOptions = {
 			mode: 493 // rwxr-xr-x
 		};
-		
+
 		fs.stat("/usr/lib/systemd/system", function(error, stats) {
 			if (error) {
 				if (error.code == "ENOENT") {
@@ -274,7 +274,7 @@ function add (name, options, cb) {
 
 					for (var i = 0; i < linuxStartStopScript.length; i++) {
 						var line = linuxStartStopScript[i];
-						
+
 						line = line.replace("##NAME##", name);
 						line = line.replace("##NODE_PATH##", nodePath);
 						line = line.replace("##NODE_ARGS##", nodeArgsStr);
@@ -283,10 +283,10 @@ function add (name, options, cb) {
 						line = line.replace("##RUN_LEVELS_ARR##", runLevels.join(" "));
 						line = line.replace("##RUN_LEVELS_STR##", runLevels.join(""));
 						line = line.replace("##DEPENDENCIES##", deps);
-						
+
 						startStopScript.push(line);
 					}
-					
+
 					var startStopScriptStr = startStopScript.join("\n");
 
 					fs.writeFile(initPath, startStopScriptStr, ctlOptions, function(error) {
@@ -324,7 +324,7 @@ function add (name, options, cb) {
 
 				for (var i = 0; i < linuxSystemUnit.length; i++) {
 					var line = linuxSystemUnit[i];
-					
+
 					line = line.replace("##NAME##", name);
 					line = line.replace("##NODE_PATH##", nodePath);
 					line = line.replace("##NODE_ARGS##", nodeArgsStr);
@@ -332,10 +332,10 @@ function add (name, options, cb) {
 					line = line.replace("##PROGRAM_ARGS##", programArgsStr);
 					line = line.replace("##SYSTEMD_WANTED_BY##", systemdWantedBy);
 					line = line.replace("##DEPENDENCIES##", deps);
-					
+
 					systemUnit.push(line);
 				}
-				
+
 				var systemUnitStr = systemUnit.join("\n");
 
 				fs.writeFile(systemPath, systemUnitStr, ctlOptions, function(error) {
@@ -354,7 +354,7 @@ function add (name, options, cb) {
 			}
 		})
 	}
-	
+
 	return this;
 }
 
@@ -444,7 +444,7 @@ function run (stopCallback) {
 				stopCallback ();
 			});
 		}
-		
+
 		runInitialised = true;
 	}
 }
@@ -463,7 +463,8 @@ function startWindowsService(stopCallback) {
     // Tell Windows to send the "stop" control code.
     acceptControl ("stop");
 
-    // Called in response to the HandlerEx callback in the service.
+    // Called in response to the HandlerEx callback in the service, which is invoked when the system sends a control
+	// request to the service.
     // https://msdn.microsoft.com/library/ms683241
     function serviceCallback (control, eventType) {
         var name = controlNames[control];
@@ -520,7 +521,8 @@ function getState() {
 }
 
 /**
- * Registers the intent to receive a particular service control code. (SERVICE_STATUS.dwControlsAccepted)
+ * Registers the intent to receive a particular service control request. This ultimately calls SetServiceStatus with
+ * an updated value of SERVICE_STATUS.dwControlsAccepted, to tell Windows the new list of control codes to send.
  *
  * @param controlName The control code (or array of control codes) to receive. On or more of: "stop", "pause",
  *  "continue", "shutdown", "paramchange", "netbindadd", "netbindremove", "netbindenable", "timechange",
@@ -578,6 +580,7 @@ function acceptControl(controlName, add) {
 }
 
 var controlsAccepted = 0;
+// See: https://docs.microsoft.com/windows/win32/api/winsvc/nc-winsvc-lphandler_function_ex
 var controlCodes = {
     "start":                 0,      // not a real control code
     "stop":                  0x0001, // SERVICE_CONTROL_STOP
@@ -600,6 +603,8 @@ var controlCodes = {
 };
 var controlNames = flip(controlCodes);
 
+// Values for SERVICE_STATUS.dwCurrentState
+// See: https://docs.microsoft.com/windows/win32/api/winsvc/ns-winsvc-_service_status
 var states = {
     "stopped":          0x01, // SERVICE_STOPPED
     "start-pending":    0x02, // SERVICE_START_PENDING
@@ -611,7 +616,9 @@ var states = {
 };
 var stateNames = flip(states);
 
+// dwEventType values for received control requests, specific to a control code.
 var eventTypes = {
+    // SERVICE_CONTROL_SESSIONCHANGE. See https://docs.microsoft.com/windows/win32/termserv/wm-wtssession-change
     "sessionchange": {
         0x01: "console-connect",         // WTS_CONSOLE_CONNECT
         0x02: "console-disconnect",      // WTS_CONSOLE_DISCONNECT
@@ -640,7 +647,8 @@ function flip(obj) {
 var eventEmitter = new events.EventEmitter();
 
 /**
- * Adds an event listener for a service code.
+ * Adds an event listener for a service control request.
+ * Control codes are documented in https://docs.microsoft.com/windows/win32/api/winsvc/nc-winsvc-lphandler_function_ex
  *
  * @param eventName start|stop|pause|continue|interrogate|shutdown|paramchange|netbindadd|netbindremove|netbindenable|
  * netbinddisable|deviceevent|hardwareprofilechange|powerevent|sessionchange|preshutdown|timechange|triggerevent
