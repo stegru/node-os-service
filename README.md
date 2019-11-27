@@ -304,6 +304,75 @@ The following example stops the calling program specifying a return code of
         service.stop (0);
     });
 
+## service.getState ()
+
+(Windows only)
+
+Gets the current state of the service, according to the OS. The return value can be one of:
+`stopped`, `start-pending`, `stop-pending`, `running`, `continue-pending`, `pause-pending`, or `paused`
+
+## service.setState (`state`)
+
+(Windows only)
+
+Informs the OS of the service's state.
+
+`state` can be `stopped`, `running`, or `paused`.
+
+Setting a value of `stopped` will stop the service by calling `service.stop(0)`
+
+## service.acceptControl (controlName[, add])
+
+(Windows only)
+
+Tells the OS this service accepts a control request with the code identified by `controlName`. If `add` is `false`, then
+the control code will no longer be received.
+
+See `service.on` for the list of control code names.
+
+## service.on (eventName, fn)
+
+(Windows only)
+
+Adds a listener function `fn` which gets called with `fn(eventName[, eventType])` when the services receives a
+[control request](https://docs.microsoft.com/windows/win32/services/service-control-requests). For convenience,
+`service.acceptControl` will automatically be called with `eventName`.
+
+The following lists the events can be emitted, along with their corresponding control code (see
+[ControlService](https://docs.microsoft.com/windows/win32/api/winsvc/nf-winsvc-controlservice)):
+
+* `start`: Emitted when the service has started.
+* `stop`: SERVICE_CONTROL_STOP
+* `pause`: SERVICE_CONTROL_PAUSE
+* `continue`: SERVICE_CONTROL_CONTINUE
+* `interrogate`: SERVICE_CONTROL_INTERROGATE
+* `shutdown`: SERVICE_CONTROL_SHUTDOWN
+* `paramchange`: SERVICE_CONTROL_PARAMCHANGE
+* `netbindadd`: SERVICE_CONTROL_NETBINDADD
+* `netbindremove`: SERVICE_CONTROL_NETBINDREMOVE
+* `netbindenable`: SERVICE_CONTROL_NETBINDENABLE
+* `netbinddisable`: SERVICE_CONTROL_NETBINDDISABLE
+* `deviceevent`: SERVICE_CONTROL_DEVICEEVENT
+* `hardwareprofilechange`: SERVICE_CONTROL_HARDWAREPROFILECHANGE
+* `powerevent`: SERVICE_CONTROL_POWEREVENT
+* `sessionchange`: SERVICE_CONTROL_SESSIONCHANGE
+  `eventType` will be one of the following values: (see [WM_WTSSESSION_CHANGE](https://docs.microsoft.com/windows/win32/termserv/wm-wtssession-change))
+    * `console-connect`: WTS_CONSOLE_CONNECT
+    * `console-disconnect`: WTS_CONSOLE_DISCONNECT
+    * `remote-connect`: WTS_REMOTE_CONNECT
+    * `remote-disconnect`: WTS_REMOTE_DISCONNECT
+    * `session-logon`: WTS_SESSION_LOGON
+    * `session-logoff`: WTS_SESSION_LOGOFF
+    * `session-lock`: WTS_SESSION_LOCK
+    * `session-unlock`: WTS_SESSION_UNLOCK
+    * `session-remote-control`: WTS_SESSION_REMOTE_CONTROL
+    * `session-create`: WTS_SESSION_CREATE
+    * `session-terminate`: WTS_SESSION_TERMINATE
+* `preshutdown`: SERVICE_CONTROL_PRESHUTDOWN
+* `timechange`: SERVICE_CONTROL_TIMECHANGE
+* `triggerevent`: SERVICE_CONTROL_TRIGGEREVENT
+* `*`: A catch-all event handler for every control code registered by `service.acceptControl`.
+
 # Example Programs
 
 Example programs are included under the modules `example` directory.

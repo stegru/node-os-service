@@ -30,6 +30,9 @@ static NAN_METHOD(IsStopRequested);
 static NAN_METHOD(Remove);
 static NAN_METHOD(Run);
 static NAN_METHOD(Stop);
+static NAN_METHOD(SetControlsAccepted);
+static NAN_METHOD(SetState);
+static NAN_METHOD(GetState);
 
 }; /* namespace service */
 
