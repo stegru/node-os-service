@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string>
 #include <queue>
+#include <tuple>
 #include <windows.h>
 
 #include "pthread.h"
@@ -28,7 +29,7 @@ static pthread_mutex_t stop_requested_mtx;
 static pthread_cond_t stop_service;
 static pthread_mutex_t stop_service_mtx;
 
-static std::queue<std::pair<DWORD, DWORD>> signals;
+static std::queue<std::tuple<DWORD, DWORD, DWORD>> signals;
 static pthread_mutex_t signals_mtx;
 
 HANDLE node_thread_handle;
@@ -73,28 +74,29 @@ DWORD set_status (DWORD status_code, DWORD win32_rcode, DWORD service_rcode) {
 void invoke_callback(uv_async_t* handle) {
 	Nan::HandleScope scope;
 	Isolate* isolate = Isolate::GetCurrent();
-	
+
 	pthread_mutex_lock(&signals_mtx);
 
 	while (!signals.empty()) {
-		std::pair<DWORD, DWORD> pair = signals.front();
-		
+		std::tuple<DWORD, DWORD, DWORD> tuple = signals.front();
+
 		Local<Value> argv[] = {
-			Number::New(isolate, pair.first),
-			Number::New(isolate, pair.second)
+			Number::New(isolate, std::get<0>(tuple)),
+			Number::New(isolate, std::get<1>(tuple)),
+			Number::New(isolate, std::get<2>(tuple))
 		};
-		callback->Call(2, argv);
+		callback->Call(3, argv);
 		signals.pop();
 	}
 
 	pthread_mutex_unlock(&signals_mtx);
 }
 
-void send_control(DWORD control, DWORD event_type) {
+void send_control(DWORD control, DWORD event_type, DWORD event_data) {
 	// The signals are put in a queue because uv_async_send doesn't guarantee to invoke
 	// this function every time.
 	pthread_mutex_lock(&signals_mtx);
-	signals.push(std::make_pair(control, event_type));
+	signals.push(std::make_tuple(control, event_type, event_data));
 	pthread_mutex_unlock(&signals_mtx);
 	// Invoke the call back on the main thread
 	uv_async_send(&async);
@@ -102,6 +104,7 @@ void send_control(DWORD control, DWORD event_type) {
 
 DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID context) {
 
+    int data = (int)event_data;
 	switch (signal) {
 		case (SERVICE_CONTROL_STOP):
 		case (SERVICE_CONTROL_SHUTDOWN):
@@ -116,11 +119,14 @@ DWORD WINAPI handler (DWORD signal, DWORD event_type, LPVOID event_data, LPVOID 
 		case (SERVICE_CONTROL_CONTINUE):
 			set_status(SERVICE_CONTINUE_PENDING, NO_ERROR, 0);
 			break;
+        case (SERVICE_CONTROL_SESSIONCHANGE):
+            data = ((WTSSESSION_NOTIFICATION*)event_data)->dwSessionId;
+            break;
 		default:
 			break;
 	}
 
-	send_control(signal, event_type);
+	send_control(signal, event_type, data);
 
 	return NO_ERROR;
 }
@@ -133,7 +139,7 @@ VOID WINAPI run (DWORD argc, LPTSTR *argv) {
 
 	set_status (SERVICE_RUNNING, NO_ERROR, 0);
 
-	send_control(0, 0);
+	send_control(0, 0, 0);
 
 	pthread_mutex_lock (&stop_service_mtx);
 	pthread_cond_wait (&stop_service, &stop_service_mtx);
@@ -178,13 +184,13 @@ void InitAll (Handle<Object> exports) {
 
 	exports->Set(Nan::New("isStopRequested").ToLocalChecked(),
 			Nan::GetFunction(Nan::New<FunctionTemplate>(IsStopRequested)).ToLocalChecked());
-	
+
 	exports->Set(Nan::New("remove").ToLocalChecked(),
 			Nan::GetFunction(Nan::New<FunctionTemplate>(Remove)).ToLocalChecked());
-	
+
 	exports->Set(Nan::New("run").ToLocalChecked(),
 			Nan::GetFunction(Nan::New<FunctionTemplate>(Run)).ToLocalChecked());
-	
+
 	exports->Set(Nan::New("stop").ToLocalChecked(),
 		Nan::GetFunction(Nan::New<FunctionTemplate>(Stop)).ToLocalChecked());
 
@@ -202,31 +208,31 @@ NODE_MODULE(service, InitAll)
 
 NAN_METHOD(Add) {
 	Nan::HandleScope scope;
-	
+
 	if (info.Length() < 3) {
 		Nan::ThrowError("At lease 3 arguments are required");
 		return;
 	}
-	
+
 	if (! info[0]->IsString()) {
 		Nan::ThrowTypeError("Name argument must be a string");
 		return;
 	}
-	
+
 	Nan::Utf8String name(info[0]);
 
 	if (! info[1]->IsString ()) {
 		Nan::ThrowTypeError("Display name argument must be a string");
 		return;
 	}
-	
+
 	Nan::Utf8String display_name(info[1]);
 
 	if (! info[2]->IsString ()) {
 		Nan::ThrowTypeError("Path argument must be a string");
 		return;
 	}
-	
+
 	Nan::Utf8String path(info[2]);
 
 	std::string username;
@@ -237,7 +243,7 @@ NAN_METHOD(Add) {
 			Nan::Utf8String tmp_username(info[3]);
 			username = *tmp_username;
 		}
-	
+
 		if (info.Length() > 4) {
 			if (info[4]->IsString ()) {
 				Nan::Utf8String tmp_password(info[4]);
@@ -292,23 +298,23 @@ NAN_METHOD(IsStopRequested) {
 	bool requested = stop_requested ? true : false;
 	stop_requested = false;
 	pthread_mutex_unlock (&stop_requested_mtx);
-	
+
 	info.GetReturnValue().Set(requested);
 }
 
 NAN_METHOD(Remove) {
 	Nan::HandleScope scope;
-	
+
 	if (info.Length () < 1) {
 		Nan::ThrowError("One argument is required");
 		return;
 	}
-	
+
 	if (! info[0]->IsString ()) {
 		Nan::ThrowTypeError("Name argument must be a string");
 		return;
 	}
-	
+
 	Nan::Utf8String name(info[0]);
 
 	SC_HANDLE scm_handle = OpenSCManager (0, SERVICES_ACTIVE_DATABASE,
@@ -373,7 +379,7 @@ NAN_METHOD(Run) {
 	} else {
 		CloseHandle (handle);
 	}
-	
+
 	run_initialised = true;
 
 	info.GetReturnValue().Set(info.This());
@@ -381,28 +387,28 @@ NAN_METHOD(Run) {
 
 NAN_METHOD(Stop) {
 	Nan::HandleScope scope;
-	
+
 	if (! run_initialised) {
 		info.GetReturnValue().Set(info.This());
 		return;
 	}
-	
+
 	int rcode = 0;
-	
+
 	if (info.Length () > 1) {
 		if (! info[0]->IsUint32 ()) {
 			Nan::ThrowTypeError("Name argument must be a string");
 			return;
 		}
-		
+
 		rcode = Nan::To<Uint32>(info[0]).ToLocalChecked()->Value();
 	}
 
 	set_status (SERVICE_STOP_PENDING, NO_ERROR, 0);
-	
+
 	pthread_cond_signal (&stop_service);
-	
-	set_status (SERVICE_STOPPED, NO_ERROR, rcode);			
+
+	set_status (SERVICE_STOPPED, NO_ERROR, rcode);
 
 	uv_close((uv_handle_t*)&async, NULL);
 
